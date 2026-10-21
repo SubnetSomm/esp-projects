@@ -6,3 +6,6 @@
 *.pem
 *.key
 *.zip
+
+# Local agent instructions
+AGENTS.md
