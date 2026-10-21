@@ -1,0 +1,15 @@
+.pio/
+src/dashboard.h
+
+
+# Local credentials, exports, build products, and private archives
+.DS_Store
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets.yml
+*.pem
+*.key
+*.zip
+*.csv

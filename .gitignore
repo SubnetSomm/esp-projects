@@ -1,0 +1,8 @@
+.DS_Store
+**/.pio/
+**/.env
+**/secrets.yaml
+**/secrets.yml
+*.pem
+*.key
+*.zip
