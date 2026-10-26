@@ -10,9 +10,11 @@
 #include "dashboard.h"
 #include "battery.h"
 #include "guidance.h"
+#include "networking.h"
 RTC_DATA_ATTR GuidanceState guidance = {};
 
 // Soil probe, battery divider, and active-low momentary button.
+constexpr int LED_PIN = 21; // D6/TX -> 1K resistor -> LED anode; cathode -> GND
 constexpr int BUTTON_PIN = 4; // D2/A2, external 10K pull-up to 3V3; switch to GND
 RTC_DATA_ATTR uint32_t retainedBoot = 0;
 RTC_DATA_ATTR int64_t sessionOriginUs = 0;
@@ -46,6 +48,17 @@ uint16_t latestBatteryMv = 0;
 bool watering = false, storageReady = false, writeHealthy = true;
 String apPassword;
 String csrf;
+MonitorNetwork network;
+LedSignal currentLedSignal() {
+  if (sleepRequested) return LedSignal::SleepReady;
+  if (!storageReady || !writeHealthy || !validSoilRaw(latestRaw)) return LedSignal::Fault;
+  if (network.connecting()) return LedSignal::Connecting;
+  if (watering) return LedSignal::Watering;
+  if (guidance.needsWater) return LedSignal::WaterNeeded;
+  return network.joined() ? LedSignal::JoinedMonitor : LedSignal::HotspotMonitor;
+}
+void updateLed() { digitalWrite(LED_PIN, ledOn(currentLedSignal(), millis()) ? HIGH : LOW); }
+
 
 float moisture(uint16_t raw) {
   return relativeSoilMoisture(raw, dryRaw, wetRaw);
@@ -125,6 +138,7 @@ void enterSleep() {
   Serial.flush();
   server.stop();
   WiFi.mode(WIFI_OFF);
+  digitalWrite(LED_PIN, LOW);
   LittleFS.end();
   esp_deep_sleep_start();
 }
@@ -177,6 +191,8 @@ void status() {
   s += ",\"batteryPercent\":" + (validBatteryMv(latestBatteryMv) ? String(batteryPercent(latestBatteryMv),0) : String("null"));
   s += ",\"storage\":" + String(storageReady && writeHealthy ? "true" : "false");
   s += ",\"records\":" + String(storageReady ? currentCount + countFile(PREVIOUS) : 0);
+  s += ",\"wifi\":" + network.statusJson();
+  s += ",\"led\":\"" + String(ledSignalName(currentLedSignal())) + "\"";
   s += ",\"token\":\"" + csrf + "\"}";
   server.sendHeader("Cache-Control", "no-store");
   server.send(200, "application/json", s);
@@ -215,8 +231,62 @@ void sendHistory(bool csv) {
   if (!csv) server.sendContent("]");
   server.sendContent("");
 }
+void wifiSettings() {
+  if (!authorize()) return;
+  if (network.isPending()) { server.send(409, "application/json", "{\"error\":\"Previous Wi-Fi settings are still applying\"}"); return; }
+  String mode = server.arg("mode");
+  if (mode != "host" && mode != "join" && mode != "both") {
+    server.send(400, "application/json", "{\"error\":\"Choose Host, Join, or Host + Join\"}"); return;
+  }
+  NetworkSettings next = network.settings;
+  next.mode = mode == "both" ? WifiChoice::Both : mode == "join" ? WifiChoice::Join : WifiChoice::Host;
+  if (next.mode != WifiChoice::Host) {
+    String ssid = server.arg("ssid"), password = server.arg("password");
+    if (ssid.length() < 1 || ssid.length() > 32 || password.length() > 63) {
+      server.send(400, "application/json", "{\"error\":\"Network name must be 1–32 bytes; password at most 63 bytes\"}"); return;
+    }
+    for (char c : ssid) if (!c) { server.send(400, "application/json", "{\"error\":\"Invalid network name\"}"); return; }
+    for (char c : password) if (!c) { server.send(400, "application/json", "{\"error\":\"Invalid password\"}"); return; }
+    bool open = server.arg("open") == "true";
+    bool sameNetwork = ssid == String(network.settings.ssid);
+    if (open) password = "";
+    else if (!password.length() && sameNetwork && network.settings.password[0]) password = network.settings.password;
+    else if (password.length() < 8) {
+      server.send(400, "application/json", "{\"error\":\"Enter an 8–63 byte Wi-Fi password or select Open network\"}"); return;
+    }
+    memset(next.ssid, 0, sizeof(next.ssid)); memset(next.password, 0, sizeof(next.password));
+    ssid.toCharArray(next.ssid, sizeof(next.ssid)); password.toCharArray(next.password, sizeof(next.password));
+  }
+  if (!validNetworkSettings(next)) { server.send(400, "application/json", "{\"error\":\"Invalid Wi-Fi settings\"}"); return; }
+  if (prefs.putBytes("wifiCfg", &next, sizeof(next)) != sizeof(next)) {
+    server.send(500, "application/json", "{\"error\":\"Could not save Wi-Fi settings\"}"); return;
+  }
+  network.settings = next;
+  network.scheduleApply(); // return response before changing the radio
+  status();
+}
+void wifiScanStart() {
+  if (!authorize()) return;
+  int result = network.startScan();
+  if (result == -3) { server.send(409, "application/json", "{\"error\":\"Wait for the Wi-Fi connection attempt to finish, then scan again\"}"); return; }
+  if (result == WIFI_SCAN_FAILED) { server.send(503, "application/json", "{\"error\":\"Scan failed; enter the network name manually\"}"); return; }
+  server.send(202, "application/json", "{\"scanning\":true}");
+}
+void wifiScanResults() {
+  int count = WiFi.scanComplete();
+  String out = "{\"scanning\":" + String(count == WIFI_SCAN_RUNNING ? "true" : "false");
+  out += ",\"failed\":" + String(count == WIFI_SCAN_FAILED ? "true" : "false") + ",\"networks\":[";
+  for (int i = 0; i < count && i < 40; ++i) {
+    if (i) out += ",";
+    out += "{\"ssid\":" + jsonQuote(WiFi.SSID(i)) + ",\"rssi\":" + String(WiFi.RSSI(i));
+    out += ",\"open\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "true" : "false") + "}";
+  }
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", out + "]}");
+}
 void setup() {
   Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   auto wakeCause = esp_sleep_get_wakeup_cause();
   bool sleepWake = wakeCause == ESP_SLEEP_WAKEUP_TIMER || wakeCause == ESP_SLEEP_WAKEUP_GPIO;
@@ -265,12 +335,20 @@ void setup() {
     sample();
     enterSleep();
   }
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP("Soil Monitor", apPassword.c_str(), 1, false, 2);
+  NetworkSettings saved;
+  if (prefs.getBytesLength("wifiCfg") == sizeof(saved)) {
+    prefs.getBytes("wifiCfg", &saved, sizeof(saved));
+    if (validNetworkSettings(saved)) network.settings = saved;
+  }
+  network.begin(apPassword);
   Serial.printf("\nWi-Fi: Soil Monitor\nPassword: %s\nDashboard: http://192.168.4.1\n",apPassword.c_str());
   const char *headers[]={"X-Soil-Token"}; server.collectHeaders(headers,1);
   server.on("/",HTTP_GET,[]{server.send_P(200,"text/html",DASHBOARD);});
   server.on("/api/status",HTTP_GET,status);
+  server.on("/api/wifi",HTTP_GET,[]{server.sendHeader("Cache-Control", "no-store"); server.send(200,"application/json",network.statusJson());});
+  server.on("/api/wifi",HTTP_POST,wifiSettings);
+  server.on("/api/wifi/scan",HTTP_POST,wifiScanStart);
+  server.on("/api/wifi/scan",HTTP_GET,wifiScanResults);
   server.on("/api/history",HTTP_GET,[]{sendHistory(false);});
   server.on("/history.csv",HTTP_GET,[]{sendHistory(true);});
   server.on("/api/time",HTTP_POST,[]{
@@ -308,9 +386,12 @@ void setup() {
 void loop() {
   server.handleClient();
   handleButton();
+  network.tick();
+  updateLed();
   if(Serial.available() && Serial.read()=='?') {
     Serial.printf("Wi-Fi: Soil Monitor\nPassword: %s\nDashboard: http://192.168.4.1\nHistory: %s (%u current records)\n",apPassword.c_str(),storageReady&&writeHealthy?"healthy":"unavailable",currentCount);
     Serial.printf("Battery: %u mV; valid=%s; estimate=%.0f%%\n",latestBatteryMv,validBatteryMv(latestBatteryMv)?"yes":"no",batteryPercent(latestBatteryMv));
+    Serial.printf("Network: %s\nLED: %s\n", network.statusJson().c_str(), ledSignalName(currentLedSignal()));
   }
   if(watering && uint32_t(millis()-wateringSince)>=WATER_TIMEOUT_MS) setMode(false);
   if(uint32_t(millis()-lastSample)>=(watering?WATER_MS:MONITOR_MS)) sample();

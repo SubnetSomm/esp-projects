@@ -1,7 +1,7 @@
 # Planned iterations
 
 ## Wi-Fi connection settings
-Add portal controls for Host, Join, and Host + Join modes. Prefer Host + Join for portable demonstrations, save network settings, show the joined network address, and keep hotspot access available when the saved network is unavailable. Deep sleep turns off both Wi-Fi connections. Not implemented yet.
+Implemented portal controls for Host, Join, and Host + Join, saved network credentials, asynchronous scans, joined IP/local-name links, Join-only recovery grace, and fallback hotspot. Real network testing remains pending. Deep sleep turns off both Wi-Fi connections. Single-color status LED support and wiring guide are implemented.
 
 ## Plant-specific watering guidance
 Use the current Watering mode to collect stable raw readings for approximately one minute before watering a plant known to need water. Water normally, allow excess water to drain, then collect stable readings again. Keep probe placement consistent. Use these as provisional needs-water and well-watered references, rather than measured volumetric water content.

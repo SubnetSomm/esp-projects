@@ -1,6 +1,6 @@
 # Standalone soil monitor — local Wi-Fi dashboard
 
-This version runs on the XIAO ESP32C3 without Home Assistant, a router, internet access, or a phone app. The phone connects directly to the device Wi-Fi and opens its embedded webpage.
+This version runs on the XIAO ESP32C3 without Home Assistant or a phone app. Use its portable hotspot, join an existing 2.4 GHz Wi-Fi network, or use both. A router and internet are optional.
 
 ## Connect
 
@@ -29,7 +29,7 @@ The phone supplies date/time when opening the page. The device uses elapsed time
 
 - Seeed XIAO ESP32C3, soil signal A0/GPIO2, sensor power 3V3 and GND.
 - PKCELL LP803860 3.7 V 2000 mAh battery, with existing USB charging hardware.
-- Battery measurement: BAT+ → 100KΩ → A1/GPIO3 → 100KΩ → GND. Averaged calibrated ADC voltage is doubled for the divider. Button: D2/A2/GPIO4 pulled up to 3V3 through external 10KΩ; normally open momentary switch between GPIO4 and GND. No indicator LED, screen, Bluetooth, or Home Assistant integration is implemented. Deep sleep retains the session clock and boot ID in RTC memory so phone clock anchors continue across timer wakes; power loss starts a new session. Existing 16-byte history records and CSV format are preserved.
+- Battery measurement: BAT+ → 100KΩ → A1/GPIO3 → 100KΩ → GND. Averaged calibrated ADC voltage is doubled for the divider. Button: D2/A2/GPIO4 pulled up to 3V3 through external 10KΩ; normally open momentary switch between GPIO4 and GND. A single-color status LED connects to D6/GPIO21 through 1 kΩ, with its cathode to GND; see [WIRING.md](WIRING.md). No screen, Bluetooth, or Home Assistant integration is implemented. Deep sleep retains the session clock and boot ID in RTC memory so phone clock anchors continue across timer wakes; power loss starts a new session. Existing 16-byte history records and CSV format are preserved.
 
 ## Build and upload
 
@@ -43,7 +43,7 @@ pio device monitor --port /dev/cu.usbmodem2101 --baud 115200
 
 The USB port can change. The previous ESPHome firmware may hide the USB port while asleep; press Reset to wake it before uploading. No separate filesystem upload is needed: the webpage is embedded in firmware. The log filesystem is initialized on first standalone boot. Subsequent filesystem failures are reported instead of automatically formatting saved history.
 
-The Wi-Fi password is unique to the device, not hardcoded in source. Dashboard changes require a same-origin token in addition to joining the hotspot. Anyone with hotspot access can view/export history. There is no internet-facing service.
+The Wi-Fi password is unique to the device, not hardcoded in source. Dashboard changes require a same-origin token in addition to joining the hotspot. Anyone on the hotspot or joined local network can view/export history and obtain the dashboard token used for controls. Wi-Fi credentials are saved in device Preferences, never returned by API responses or included in the repository. The local webpage uses HTTP, not HTTPS. Do not expose it through port forwarding; there is no cloud service.
 
 ## Validation / current state
 
@@ -81,3 +81,21 @@ Validation: host C++ tests cover confirmation duration, monitoring and watering 
 The user measured 3.822 V across the battery while the sampled dashboard value was 3.75 V. New ADC-derived battery readings are multiplied by 3822/3750 = 1.0192 before display, percentage estimation, and history encoding. This is a single-point gain adjustment, assuming the supplied readings were simultaneous on battery power with USB disconnected as requested. It is not a full-range ADC calibration or a measured capacity curve. Check another paired reading later at a different charge level.
 
 Previously recorded history and CSV exports remain unchanged; older and newer voltage points therefore use different calibration. New history still uses the existing 20 mV resolution. The percentage remains a generic voltage-based estimate affected by load and charging. Missing/invalid ADC inputs are not converted into plausible voltages.
+
+## Wi-Fi settings and LED (2026-10-26)
+
+Open **Wi-Fi & status LED** in the dashboard. Choose Host, Host + Join (recommended), or Join. Find networks or type a 2.4 GHz SSID, enter its password, and save. Only ordinary personal Wi-Fi (8–63 byte passphrase) and explicitly selected open networks are supported; enterprise login and captive-portal sign-in are not implemented. A blank password keeps the saved password only for the same SSID; changing to an open network requires the Open network checkbox. The initial mode remains Host, so existing hotspot access is retained on upgrade.
+
+- Host: broadcasts Soil Monitor as before. Existing joined-network settings are retained for later use.
+- Host + Join: keeps the hotspot while also joining the saved network. Connect your iPhone to that existing network to retain normal internet and reach the device's joined IP. The device does not route internet from its joined network to hotspot clients.
+- Join: starts with a fallback hotspot. After successfully joining, keeps the hotspot for 120 seconds, shows the joined IP and a device-specific `.local` name, then disables the AP radio. The hotspot returns if the station connection drops. A failed join never removes fallback hotspot access; reconnect attempts recur at roughly one-minute intervals.
+
+Settings apply about one second after the response, without rebooting or clearing history. Radio channel changes or scanning may briefly interrupt a connected phone. If the saved network uses the default hotspot subnet, the hotspot selects a different subnet (normally 192.168.5.1 instead of 192.168.4.1); reconnect and use the address shown in settings or the USB `?` status output. The normal default hotspot address remains 192.168.4.1. Hostnames are device-specific; the IP link remains available if multicast naming is blocked. Guest/client-isolated Wi-Fi can prevent local access even when the device joins.
+
+Deep sleep turns off both Wi-Fi interfaces and the LED. A button wake or Reset starts the saved mode with a fresh hotspot recovery window; unattended timer wakes log and return to sleep without starting Wi-Fi. Networking settings are saved as one versioned Preferences blob; old firmware credentials, calibration, and LittleFS logs remain intact.
+
+LED wiring and blink patterns are in [WIRING.md](WIRING.md) and the portal. The single LED is optional; no pin rewiring of the existing soil sensor, battery divider, or button is needed. Four-leg RGB support is deferred.
+
+Validation: firmware compilation, soil and battery regression tests, LED pulse and network-setting validation tests, and host tests of the real network manager covering failure, retries, two-minute Join grace, actual AP-radio disable, fallback restoration, subnet collision, scanning, and secret-free JSON passed. Dashboard syntax and mocked rendering passed for mode controls, address links, fallback/countdown, preserving edited forms, and handling network names as text. Browser visual verification was unavailable. Real router joins, RF reconnect behavior, and physical LED/sleep patterns require hardware checks.
+
+Combined Wi-Fi/LED/soil-guidance/battery-calibration firmware uploaded on 2026-10-26; all flash hashes verified. USB status confirmed default Host mode, hotspot 192.168.4.1, hostname soil-monitor-6e27ac.local for this device, LED state hotspot_monitor, and healthy history increasing from 2299 to 2300 records across the upgrade. Battery reported 3.954 V on USB power; this is not an independent verification of the battery-only correction because charging was active. Router joins and physical LED wiring remain to be checked.
