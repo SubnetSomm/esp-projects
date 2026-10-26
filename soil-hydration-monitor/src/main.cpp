@@ -9,6 +9,8 @@
 #include <sys/time.h>
 #include "dashboard.h"
 #include "battery.h"
+#include "guidance.h"
+RTC_DATA_ATTR GuidanceState guidance = {};
 
 // Soil probe, battery divider, and active-low momentary button.
 constexpr int BUTTON_PIN = 4; // D2/A2, external 10K pull-up to 3V3; switch to GND
@@ -38,14 +40,15 @@ WebServer server(80);
 Anchor anchors[32] = {};
 uint32_t bootId, sequence = 0, lastSample = 0, wateringSince = 0;
 uint32_t currentCount = 0, anchorSlot = 0;
-uint16_t latestRaw = 0, dryRaw = 3039, wetRaw = 1370;
+uint16_t latestRaw = 0, dryRaw = SOIL_NEEDS_WATER_RAW, wetRaw = SOIL_SETTLED_WET_RAW;
+bool persistedNeedsWater = false;
 uint16_t latestBatteryMv = 0;
 bool watering = false, storageReady = false, writeHealthy = true;
 String apPassword;
 String csrf;
 
 float moisture(uint16_t raw) {
-  return constrain(100.0f * (float(dryRaw) - raw) / (float(dryRaw) - wetRaw), 0.0f, 100.0f);
+  return relativeSoilMoisture(raw, dryRaw, wetRaw);
 }
 uint32_t recordEpoch(const Record &r) {
   for (const auto &a : anchors) if (a.boot == r.boot && a.epoch >= VALID_EPOCH) {
@@ -82,6 +85,10 @@ void sample() {
   for (int i=0;i<32;++i) { batteryTotal += analogReadMilliVolts(BATTERY_PIN); delay(3); }
   latestBatteryMv = (batteryTotal * 2 + 16) / 32;
   lastSample = millis();
+  observeSoil(guidance, latestRaw, dryRaw, wetRaw, sessionSeconds());
+  if (persistedNeedsWater != guidance.needsWater) {
+    if (prefs.putBool("needsWater", guidance.needsWater)) persistedNeedsWater = guidance.needsWater;
+  }
   Record r{++sequence, bootId, sessionSeconds(), latestRaw, uint8_t(watering), encodeBatteryMv(latestBatteryMv)};
   if (storageReady) {
     if (currentCount >= FILE_RECORDS) {
@@ -163,6 +170,9 @@ void status() {
   s += ",\"nextSample\":" + String(max(0L, long((watering ? WATER_MS : MONITOR_MS) - min(uint32_t(millis()-lastSample), watering ? WATER_MS : MONITOR_MS)))/1000);
   s += ",\"wateringRemaining\":" + String(watering ? (WATER_TIMEOUT_MS-min(uint32_t(millis()-wateringSince), WATER_TIMEOUT_MS))/1000 : 0);
   s += ",\"dry\":" + String(dryRaw) + ",\"wet\":" + String(wetRaw);
+  s += ",\"soilValid\":" + String(validSoilRaw(latestRaw) ? "true" : "false");
+  s += ",\"advice\":\"" + String(soilAdvice(guidance, latestRaw, dryRaw, wetRaw)) + "\"";
+  s += ",\"provisionalCalibration\":" + String(dryRaw == SOIL_NEEDS_WATER_RAW && wetRaw == SOIL_SETTLED_WET_RAW ? "true" : "false");
   s += ",\"batteryMv\":" + (validBatteryMv(latestBatteryMv) ? String(latestBatteryMv) : String("null"));
   s += ",\"batteryPercent\":" + (validBatteryMv(latestBatteryMv) ? String(batteryPercent(latestBatteryMv),0) : String("null"));
   s += ",\"storage\":" + String(storageReady && writeHealthy ? "true" : "false");
@@ -220,8 +230,22 @@ void setup() {
   analogSetPinAttenuation(SOIL_PIN, ADC_11db);
   analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
   prefs.begin("soil-local", false);
-  dryRaw = prefs.getUShort("dry",3039); wetRaw = prefs.getUShort("wet",1370);
-  if (abs(int(dryRaw)-int(wetRaw)) < 100) { dryRaw=3039; wetRaw=1370; }
+  dryRaw = prefs.getUShort("dry", SOIL_NEEDS_WATER_RAW);
+  wetRaw = prefs.getUShort("wet", SOIL_SETTLED_WET_RAW);
+  // Only replace the original air/water defaults; preserve custom calibration.
+  if (!prefs.getBool("soilCycle1", false)) {
+    if (dryRaw == 3039 && wetRaw == 1370) {
+      prefs.putUShort("priorDry", dryRaw); prefs.putUShort("priorWet", wetRaw);
+      dryRaw = SOIL_NEEDS_WATER_RAW; wetRaw = SOIL_SETTLED_WET_RAW;
+      prefs.putUShort("dry", dryRaw); prefs.putUShort("wet", wetRaw);
+    }
+    prefs.putBool("soilCycle1", true);
+  }
+  if (!validSoilCalibration(dryRaw, wetRaw)) {
+    dryRaw = SOIL_NEEDS_WATER_RAW; wetRaw = SOIL_SETTLED_WET_RAW;
+  }
+  persistedNeedsWater = prefs.getBool("needsWater", false);
+  if (!sleepWake) resetGuidance(guidance, persistedNeedsWater);
   if (prefs.getBytesLength("anchors") == sizeof(anchors)) prefs.getBytes("anchors",anchors,sizeof(anchors));
   anchorSlot = prefs.getUInt("anchorSlot",0)%32;
   bootId = retainedBoot;
@@ -272,10 +296,13 @@ void setup() {
     auto numeric=[](const String &s){if(!s.length())return false;for(char c:s)if(c<'0'||c>'9')return false;return true;};
     int dry=d.toInt(),wet=w.toInt();
     if(!numeric(d)||!numeric(w)||d.length()>4||w.length()>4||dry>4095||wet>4095||abs(dry-wet)<100) {server.send(400,"application/json","{\"error\":\"Use 0–4095 and separate endpoints by at least 100 counts\"}");return;}
-    dryRaw=dry;wetRaw=wet;prefs.putUShort("dry",dryRaw);prefs.putUShort("wet",wetRaw);status();
+    dryRaw=dry;wetRaw=wet;prefs.putUShort("dry",dryRaw);prefs.putUShort("wet",wetRaw);
+    resetGuidance(guidance); persistedNeedsWater = false; prefs.putBool("needsWater", false);
+    sample(); status();
   });
   server.onNotFound([]{server.send(404,"text/plain","Not found");});
   sample();server.begin();
+  Serial.printf("Soil calibration: needs-water=%u settled-wet=%u; advice=%s\n", dryRaw, wetRaw, soilAdvice(guidance, latestRaw, dryRaw, wetRaw));
   Serial.printf("Button firmware ready: D2/GPIO4=%s; hold 2 seconds and release to sleep.\n", digitalRead(BUTTON_PIN)==LOW ? "pressed" : "released");
 }
 void loop() {
