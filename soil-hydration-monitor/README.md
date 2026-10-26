@@ -72,6 +72,12 @@ The relative scale maps the needs-water reference to 0% and the settled-wet refe
 
 Evidence counters survive deep sleep in RTC memory. The confirmed alert persists across complete power loss in Preferences; cold boots restart consecutive evidence. Changing calibration resets the alert/evidence and takes a fresh sample. Near-rail readings (100 counts or below, or 4090 or above) show Check the probe, interrupt consecutive evidence, and cannot clear an existing alert. A probe removed into air can still look like dry soil; firmware cannot reliably distinguish that condition with this hardware.
 
-The dashboard presents recommendations only while connected, and labels them unavailable/stale if the connection fails. There are no background phone notifications. History record layout, raw data, CSV columns, battery conversion, and sleep/button behavior are preserved. Battery voltage calibration awaits simultaneous multimeter and fresh dashboard readings with USB disconnected; the historical voltage trend alone cannot calibrate voltage or remaining capacity.
+The dashboard presents recommendations only while connected, and labels them unavailable/stale if the connection fails. There are no background phone notifications. History record layout, raw soil data, CSV columns, and sleep/button behavior are preserved. Battery voltage now has a provisional single-point gain correction from a meter comparison; the historical voltage trend alone cannot calibrate remaining capacity.
 
 Validation: host C++ tests cover confirmation duration, monitoring and watering cadences, threshold boundaries, hysteresis, invalid sensor input, reversed calibration, and RTC-state continuation. Hardware validation remains required after upload.
+
+## Battery voltage calibration (2026-10-26)
+
+The user measured 3.822 V across the battery while the sampled dashboard value was 3.75 V. New ADC-derived battery readings are multiplied by 3822/3750 = 1.0192 before display, percentage estimation, and history encoding. This is a single-point gain adjustment, assuming the supplied readings were simultaneous on battery power with USB disconnected as requested. It is not a full-range ADC calibration or a measured capacity curve. Check another paired reading later at a different charge level.
+
+Previously recorded history and CSV exports remain unchanged; older and newer voltage points therefore use different calibration. New history still uses the existing 20 mV resolution. The percentage remains a generic voltage-based estimate affected by load and charging. Missing/invalid ADC inputs are not converted into plausible voltages.

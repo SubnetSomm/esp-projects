@@ -83,7 +83,7 @@ void sample() {
   analogReadMilliVolts(BATTERY_PIN); delay(5);
   uint32_t batteryTotal = 0;
   for (int i=0;i<32;++i) { batteryTotal += analogReadMilliVolts(BATTERY_PIN); delay(3); }
-  latestBatteryMv = (batteryTotal * 2 + 16) / 32;
+  latestBatteryMv = calibrateBatteryMv((batteryTotal * 2 + 16) / 32);
   lastSample = millis();
   observeSoil(guidance, latestRaw, dryRaw, wetRaw, sessionSeconds());
   if (persistedNeedsWater != guidance.needsWater) {

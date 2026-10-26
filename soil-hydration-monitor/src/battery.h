@@ -2,6 +2,12 @@
 #include <stdint.h>
 
 inline bool validBatteryMv(uint32_t mv) { return mv >= 2500 && mv <= 4500; }
+// Single-point battery-only meter comparison: 3822 mV actual / 3750 mV ADC.
+// Apply only to new measurements; saved history remains as originally recorded.
+inline uint16_t calibrateBatteryMv(uint32_t measuredMv) {
+  if (!validBatteryMv(measuredMv)) return 0;
+  return uint16_t((uint64_t(measuredMv) * 3822 + 1875) / 3750);
+}
 // Preserve the original 16-byte record format: the formerly unused byte now
 // stores battery voltage in 20 mV increments. Zero means unknown/legacy data.
 inline uint8_t encodeBatteryMv(uint32_t mv) {
